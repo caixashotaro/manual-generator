@@ -1,0 +1,39 @@
+# Secrets（APIキーなど）
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# 一時ファイル
+*.tmp
+*.temp
+*.mp4
+*.wav
+*.mp3
+
+# プロジェクトデータ（ローカル用）
+projects/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code
+.claude/
+
+# プロンプトファイル（開発用）
+prompt*.txt
+
+# Supabase セットアップSQL
+supabase_setup.sql
