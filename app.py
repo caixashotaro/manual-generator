@@ -1365,8 +1365,8 @@ def main():
         st.header("ファイルアップロード")
 
         uploaded_file = st.file_uploader(
-            "ファイルをアップロード",
-            type=None,
+            "ファイルをアップロード（MP4/MP3）",
+            key="file_uploader_v2",
             help="MP4（動画）またはMP3（音声）ファイルをアップロードしてください（大きなファイルは自動分割されます）"
         )
 
