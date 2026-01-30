@@ -1226,22 +1226,26 @@ def main():
             else:
                 st.info("Supabaseを設定するとプロジェクトがクラウドに保存されます")
 
-        # APIキー保存ボタン
-        if st.button("APIキーを保存", use_container_width=True):
-            try:
-                os.makedirs(os.path.dirname(secrets_path), exist_ok=True)
-                with open(secrets_path, "w") as f:
-                    if groq_api_key:
-                        f.write(f'GROQ_API_KEY = "{groq_api_key}"\n')
-                    if gemini_api_key:
-                        f.write(f'GEMINI_API_KEY = "{gemini_api_key}"\n')
-                    if supabase_url:
-                        f.write(f'SUPABASE_URL = "{supabase_url}"\n')
-                    if supabase_key:
-                        f.write(f'SUPABASE_KEY = "{supabase_key}"\n')
-                st.success("保存しました！次回から自動入力されます")
-            except Exception as e:
-                st.error(f"保存に失敗: {str(e)}")
+        # APIキー保存ボタン（ローカル環境のみ有効）
+        is_cloud = os.environ.get("STREAMLIT_SHARING_MODE") or os.path.exists("/mount/src")
+        if is_cloud:
+            st.info("クラウド環境ではStreamlit CloudのSecretsで管理されています")
+        else:
+            if st.button("APIキーを保存", use_container_width=True):
+                try:
+                    os.makedirs(os.path.dirname(secrets_path), exist_ok=True)
+                    with open(secrets_path, "w") as f:
+                        if groq_api_key:
+                            f.write(f'GROQ_API_KEY = "{groq_api_key}"\n')
+                        if gemini_api_key:
+                            f.write(f'GEMINI_API_KEY = "{gemini_api_key}"\n')
+                        if supabase_url:
+                            f.write(f'SUPABASE_URL = "{supabase_url}"\n')
+                        if supabase_key:
+                            f.write(f'SUPABASE_KEY = "{supabase_key}"\n')
+                    st.success("保存しました！次回から自動入力されます")
+                except Exception as e:
+                    st.error(f"保存に失敗: {str(e)}")
 
         whisper_model = st.selectbox(
             "Whisperモデル",
