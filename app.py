@@ -1,6 +1,6 @@
 """
 業務マニュアル自動生成アプリ
-動画（MP4）から判断基準が含まれる高度な業務マニュアルを自動生成
+動画（MP4）または音声（MP3）から判断基準が含まれる高度な業務マニュアルを自動生成
 
 アーキテクチャ:
 - 音声認識: Groq Whisper API (large-v3) - 高精度・高速
@@ -446,6 +446,85 @@ def transcribe_audio_with_groq(audio_path: str, groq_api_key: str, model: str = 
         return []
 
 
+def transcribe_audio_file(audio_path: str, groq_api_key: str,
+                          whisper_model: str = "whisper-large-v3",
+                          progress_callback=None, status_callback=None) -> list:
+    """
+    音声ファイル（MP3）を直接Groq Whisper APIで文字起こし
+    必要に応じて最適化（16kHz モノラル化）を行う
+    """
+    if status_callback:
+        status_callback("音声ファイルを最適化中...")
+    if progress_callback:
+        progress_callback(10)
+
+    # 音声を最適化（16kHz モノラル、低ビットレート）してサイズを削減
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_audio:
+        optimized_path = tmp_audio.name
+
+    try:
+        cmd = [
+            FFMPEG_PATH, "-y",
+            "-i", audio_path,
+            "-vn",
+            "-acodec", "libmp3lame",
+            "-ar", "16000",
+            "-ac", "1",
+            "-b:a", "48k",
+            optimized_path
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0 or not os.path.exists(optimized_path):
+            optimized_path = audio_path
+    except Exception:
+        optimized_path = audio_path
+
+    audio_size_mb = get_file_size(optimized_path) / (1024 * 1024)
+    if status_callback:
+        status_callback(f"音声ファイル（{audio_size_mb:.1f}MB）を処理します")
+
+    # 音声ファイルが25MB超の場合のみ分割
+    audio_chunks = split_audio_file(optimized_path)
+    num_chunks = len(audio_chunks)
+
+    if num_chunks > 1 and status_callback:
+        status_callback(f"音声を {num_chunks} 個に分割して処理します...")
+
+    # 各音声チャンクをGroq APIで文字起こし
+    all_segments = []
+    for chunk_idx, (chunk_path, start_offset, is_temp) in enumerate(audio_chunks):
+        if status_callback:
+            if num_chunks > 1:
+                status_callback(f"Groq Whisper APIで音声認識中... ({chunk_idx + 1}/{num_chunks})")
+            else:
+                status_callback("Groq Whisper APIで音声認識中...")
+
+        if progress_callback:
+            progress_callback(15 + int((chunk_idx / num_chunks) * 25))
+
+        segments = transcribe_audio_with_groq(chunk_path, groq_api_key, whisper_model)
+
+        for segment in segments:
+            segment["start"] += start_offset
+            segment["end"] += start_offset
+            all_segments.append(segment)
+
+        if is_temp:
+            try:
+                os.unlink(chunk_path)
+            except:
+                pass
+
+    # 最適化された一時ファイルを削除
+    if optimized_path != audio_path:
+        try:
+            os.unlink(optimized_path)
+        except:
+            pass
+
+    return all_segments
+
+
 def extract_frame(video_path: str, timestamp: float) -> np.ndarray:
     """指定タイムスタンプのフレームを抽出"""
     cap = cv2.VideoCapture(video_path)
@@ -467,6 +546,21 @@ def get_video_duration(video_path: str) -> float:
 
     if fps > 0:
         return frame_count / fps
+    return 0
+
+
+def get_audio_duration(audio_path: str) -> float:
+    """音声ファイルの長さを取得（ffmpegを使用）"""
+    try:
+        cmd = [FFMPEG_PATH, "-i", audio_path, "-f", "null", "-"]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        for line in result.stderr.split('\n'):
+            if 'Duration' in line:
+                time_str = line.split('Duration:')[1].split(',')[0].strip()
+                parts = time_str.split(':')
+                return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+    except Exception:
+        pass
     return 0
 
 
@@ -1088,6 +1182,8 @@ def main():
         st.session_state.current_project_name = ""
     if "video_filename" not in st.session_state:
         st.session_state.video_filename = ""
+    if "is_audio_only" not in st.session_state:
+        st.session_state.is_audio_only = False
     if "groq_api_key" not in st.session_state:
         st.session_state.groq_api_key = ""
     if "gemini_api_key" not in st.session_state:
@@ -1119,6 +1215,7 @@ def main():
             st.session_state.video_duration = 0
             st.session_state.segments = []
             st.session_state.video_filename = ""
+            st.session_state.is_audio_only = False
             st.rerun()
 
         # プロジェクト一覧表示
@@ -1265,13 +1362,20 @@ def main():
         # ============================================
         # 動画アップロードセクション
         # ============================================
-        st.header("動画アップロード")
+        st.header("ファイルアップロード")
 
         uploaded_file = st.file_uploader(
-            "動画をアップロード",
-            type=["mp4"],
-            help="MP4形式の動画ファイルをアップロードしてください（大きなファイルは自動分割されます）"
+            "ファイルをアップロード",
+            type=None,
+            help="MP4（動画）またはMP3（音声）ファイルをアップロードしてください（大きなファイルは自動分割されます）"
         )
+
+        if uploaded_file is not None:
+            # ファイル形式チェック
+            file_ext = os.path.splitext(uploaded_file.name)[1].lower()
+            if file_ext not in [".mp4", ".mp3"]:
+                st.error("MP4またはMP3ファイルをアップロードしてください")
+                uploaded_file = None
 
         if uploaded_file is not None:
             # ファイルサイズ表示
@@ -1282,10 +1386,16 @@ def main():
                 st.warning(f"大きなファイルです。{MAX_CHUNK_SIZE_MB}MB以下に自動分割して処理します。")
 
             # 一時ファイルとして保存
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
+            is_audio = uploaded_file.name.lower().endswith(".mp3")
+            file_suffix = ".mp3" if is_audio else ".mp4"
+            with tempfile.NamedTemporaryFile(delete=False, suffix=file_suffix) as tmp:
                 tmp.write(uploaded_file.read())
                 st.session_state.video_path = tmp.name
-                st.session_state.video_duration = get_video_duration(tmp.name)
+                st.session_state.is_audio_only = is_audio
+                if is_audio:
+                    st.session_state.video_duration = get_audio_duration(tmp.name)
+                else:
+                    st.session_state.video_duration = get_video_duration(tmp.name)
                 st.session_state.video_filename = uploaded_file.name
 
             if st.button("解析開始", type="primary", use_container_width=True):
@@ -1296,7 +1406,7 @@ def main():
                 else:
                     # 新しいプロジェクトIDを生成
                     st.session_state.current_project_id = generate_project_id()
-                    st.session_state.current_project_name = uploaded_file.name.replace(".mp4", "")
+                    st.session_state.current_project_name = os.path.splitext(uploaded_file.name)[0]
                     st.session_state.processing = True
                     st.session_state.groq_api_key = groq_api_key
                     st.session_state.gemini_api_key = gemini_api_key
@@ -1310,18 +1420,27 @@ def main():
 
     # メインコンテンツ
     if st.session_state.processing and st.session_state.video_path:
-        with st.spinner("動画を解析中..."):
+        with st.spinner("ファイルを解析中..."):
             progress = st.progress(0)
             status = st.empty()
 
-            # 【Stage 1-A】動画全体から音声を一括抽出 → Groq Whisper APIで文字起こし
-            all_segments = transcribe_full_video(
-                video_path=st.session_state.video_path,
-                groq_api_key=st.session_state.groq_api_key,
-                whisper_model=st.session_state.whisper_model,
-                progress_callback=lambda p: progress.progress(p),
-                status_callback=lambda s: status.text(s)
-            )
+            # 【Stage 1-A】音声認識（MP3は直接処理、MP4は音声抽出後に処理）
+            if st.session_state.is_audio_only:
+                all_segments = transcribe_audio_file(
+                    audio_path=st.session_state.video_path,
+                    groq_api_key=st.session_state.groq_api_key,
+                    whisper_model=st.session_state.whisper_model,
+                    progress_callback=lambda p: progress.progress(p),
+                    status_callback=lambda s: status.text(s)
+                )
+            else:
+                all_segments = transcribe_full_video(
+                    video_path=st.session_state.video_path,
+                    groq_api_key=st.session_state.groq_api_key,
+                    whisper_model=st.session_state.whisper_model,
+                    progress_callback=lambda p: progress.progress(p),
+                    status_callback=lambda s: status.text(s)
+                )
 
             st.session_state.segments = all_segments
 
@@ -1332,7 +1451,7 @@ def main():
             full_transcript = build_full_transcript(all_segments)
 
             if not full_transcript.strip():
-                st.warning("音声が認識されませんでした。動画に音声が含まれているか確認してください。")
+                st.warning("音声が認識されませんでした。ファイルに音声が含まれているか確認してください。")
                 st.session_state.steps = []
                 st.session_state.flow_summary = None
                 st.session_state.processing = False
@@ -1365,11 +1484,14 @@ def main():
 
                 mapped_actions = map_actions_to_segments(actions, all_segments)
 
-                # 【Stage 2-B】スクリーンショットを取得
-                status.text("スクリーンショットを取得中...")
-                progress.progress(80)
-
-                steps = extract_screenshots_for_actions(st.session_state.video_path, mapped_actions)
+                # 【Stage 2-B】スクリーンショットを取得（動画の場合のみ）
+                if not st.session_state.is_audio_only:
+                    status.text("スクリーンショットを取得中...")
+                    progress.progress(80)
+                    steps = extract_screenshots_for_actions(st.session_state.video_path, mapped_actions)
+                else:
+                    progress.progress(80)
+                    steps = mapped_actions
 
             st.session_state.steps = steps
 
@@ -1444,44 +1566,50 @@ def main():
 
         col_left, col_right = st.columns([1.5, 1])
 
-        # 右カラム: 動画プレビュー & ツール
+        # 右カラム: プレビュー & ツール
         with col_right:
-            st.subheader("動画プレビュー")
+            if not st.session_state.get("is_audio_only", False):
+                st.subheader("動画プレビュー")
 
-            if st.session_state.video_path and os.path.exists(st.session_state.video_path):
-                st.video(st.session_state.video_path)
+                if st.session_state.video_path and os.path.exists(st.session_state.video_path):
+                    st.video(st.session_state.video_path)
 
-            st.divider()
+                st.divider()
 
-            st.subheader("画像取得ツール")
+                st.subheader("画像取得ツール")
 
-            capture_time = st.slider(
-                "タイムスタンプ（秒）",
-                min_value=0.0,
-                max_value=float(max(1, int(st.session_state.video_duration))),
-                value=0.0,
-                step=0.5,
-                key="capture_slider"
-            )
+                capture_time = st.slider(
+                    "タイムスタンプ（秒）",
+                    min_value=0.0,
+                    max_value=float(max(1, int(st.session_state.video_duration))),
+                    value=0.0,
+                    step=0.5,
+                    key="capture_slider"
+                )
 
-            target_step = st.selectbox(
-                "適用先の手順",
-                options=range(len(st.session_state.steps)),
-                format_func=lambda x: f"{st.session_state.steps[x].get('index', x+1)}. {st.session_state.steps[x]['action_title']}" if not st.session_state.steps[x].get("deleted") else f"{x+1}. (削除済み)",
-                key="target_step_select"
-            )
+                target_step = st.selectbox(
+                    "適用先の手順",
+                    options=range(len(st.session_state.steps)),
+                    format_func=lambda x: f"{st.session_state.steps[x].get('index', x+1)}. {st.session_state.steps[x]['action_title']}" if not st.session_state.steps[x].get("deleted") else f"{x+1}. (削除済み)",
+                    key="target_step_select"
+                )
 
-            if st.button("この瞬間の画像をキャプチャ", use_container_width=True):
-                if st.session_state.video_path:
-                    new_frame = extract_frame(st.session_state.video_path, capture_time)
-                    if new_frame is not None:
-                        st.session_state.steps[target_step]["image"] = new_frame
-                        st.session_state.steps[target_step]["timestamp"] = format_timestamp(capture_time)
-                        st.session_state.steps[target_step]["timestamp_seconds"] = capture_time
-                        st.success("画像を更新しました")
-                        st.rerun()
-                    else:
-                        st.error("フレームの取得に失敗しました")
+                if st.button("この瞬間の画像をキャプチャ", use_container_width=True):
+                    if st.session_state.video_path:
+                        new_frame = extract_frame(st.session_state.video_path, capture_time)
+                        if new_frame is not None:
+                            st.session_state.steps[target_step]["image"] = new_frame
+                            st.session_state.steps[target_step]["timestamp"] = format_timestamp(capture_time)
+                            st.session_state.steps[target_step]["timestamp_seconds"] = capture_time
+                            st.success("画像を更新しました")
+                            st.rerun()
+                        else:
+                            st.error("フレームの取得に失敗しました")
+            else:
+                st.subheader("音声プレビュー")
+                if st.session_state.video_path and os.path.exists(st.session_state.video_path):
+                    st.audio(st.session_state.video_path)
+                st.info("音声ファイルのためスクリーンショット取得は利用できません")
 
         # 左カラム: マニュアルエディタ
         with col_left:
@@ -1614,7 +1742,7 @@ def main():
             ### 基本的な使い方
             1. **サイドバー**でGemini API Keyを入力
             2. 必要に応じてWhisperモデルを調整
-            3. MP4動画をアップロード
+            3. MP4動画またはMP3音声をアップロード
             4. 「解析開始」ボタンをクリック
             5. 生成されたマニュアルを編集
             6. Word または Markdown でダウンロード
